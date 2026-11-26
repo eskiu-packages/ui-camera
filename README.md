@@ -88,6 +88,19 @@ void Shoot() {
 | `camera_capture()` | What the mounted `CameraView` shows now, as a photo. |
 | `use_camera_frames(CameraFrameOptions, fn(*CameraFrame))` | The `CameraView`'s live frames, borrowed by pointer for the call: YUV planes (RGBA on the web), newest frame wins. See [Live frames](docs/frames.md). |
 
+## Status
+
+ui-camera is in Preview, as ui's device packages are (ui's
+[docs/stability.md](https://github.com/eskiu-packages/ui/blob/main/docs/stability.md)): `eskiuc
+test` checks it against stand-ins for the platform, not on devices, and its API may still change
+in a minor release.
+
+It works on iOS, Android, the web and macOS. The native Linux and Windows hosts have the
+library only: there the live camera works only in a `--webview` build, which uses the
+browser's `getUserMedia`. Where there is no camera, `camera_supported()` is false before
+anything mounts, and `CameraView`, `camera_take_photo` and `camera_capture` answer
+`PhotoUnavailable` through `use_photos` rather than failing silently.
+
 ## Documentation
 
 - [Live frames](docs/frames.md): `use_camera_frames`, formats, conversion to RGBA
