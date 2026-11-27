@@ -47,7 +47,8 @@ mergeInto(LibraryManager.library, {
   // from the list camera.mjs keeps (enumerateDevices is asynchronous): the length they need.
   camera_native_devices__deps: ['$stringToUTF8', '$lengthBytesUTF8'],
   camera_native_devices: function(out, capacity) {
-    const list = (window.eskiuCamera && window.eskiuCamera.devices) || [];
+    const camera = typeof window !== 'undefined' && window.eskiuCamera;
+    const list = (camera && camera.devices) || [];
     const clean = text => String(text || '').replace(/[\t\n\r]/g, ' ');
     const text = list.map(d => `${d.kind}\t${clean(d.id)}\t${clean(d.name)}\n`).join('');
     if (capacity > 0) stringToUTF8(text, out, capacity);
