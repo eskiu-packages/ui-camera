@@ -14,13 +14,14 @@ Guides and reference for ui-camera. The [README](../README.md) has the overview.
 | iOS | `PHPickerViewController` | `UIImagePickerController` | `AVCaptureSession` and `AVCapturePhotoOutput` |
 | Android | The photo picker (`ACTION_PICK_IMAGES`, Android 13+), else `ACTION_GET_CONTENT` | `ACTION_IMAGE_CAPTURE` into a MediaStore entry the package deletes after (Android 10+) | Camera2 into a `TextureView`, closed while the app is in the background |
 | Web | A file input | A file input with `capture` (phones open the camera; desktops choose a file) | `getUserMedia` into a `<video>` |
-| macOS | `NSOpenPanel` (any image file), decoded with ImageIO | None: `PhotoUnavailable` (macOS has no system camera screen) | `AVCaptureSession` and `AVCapturePhotoOutput`, the built-in camera or the default one |
+| macOS | `NSOpenPanel` (any image file), decoded with ImageIO | None: `PhotoUnavailable` (macOS has no system camera screen) | `AVCaptureSession` and `AVCapturePhotoOutput`, the built-in camera or the default one, or the one `CameraDeviceView` names |
 | Linux | GTK's file dialog (any image file), decoded with GdkPixbuf | None: `PhotoUnavailable` | None: the view reports `PhotoUnavailable` and `use_camera_frames` gets no frames |
 | Windows | The system's open dialog (any image file), decoded with GDI+ | None: `PhotoUnavailable` | None: the view reports `PhotoUnavailable` and `use_camera_frames` gets no frames |
 
 On macOS an app that takes photos shows a `CameraView` and calls `camera_capture`, since
 there is no system camera screen to open; frames come as NV12, upright as they are (rotation
-0), and a Mac's built-in camera is the front one. On Linux a camera would need PipeWire's
+0), at the size asked for, and a Mac's built-in camera has no side (`CameraView` opens it, or
+the system's default camera, whether `front` is true or not). On Linux a camera would need PipeWire's
 camera portal or V4L2, and on Windows Media Foundation's capture; neither is done yet, so the
 camera is unavailable there and never shows a made-up picture. Photos chosen on the desktops
 are saved in the user's cache directory (macOS, Linux) or temporary folder (Windows). The
@@ -41,6 +42,39 @@ there, and the library works. The Android emulator's virtual camera works.
 
 The library (`camera_pick_photo`) needs no camera. True does not mean the camera is allowed:
 the permission is asked when the first `CameraView` mounts.
+
+## Choosing a camera
+
+`camera_devices(&list)` lists the cameras; `CameraDeviceView(style, id)` shows the one with
+that id, as a `CameraView` does (captures, frames and the permission work the same).
+`CameraView(style, front)` keeps choosing by side.
+
+```eskiu
+List<CameraDevice> cameras;
+camera_devices(&cameras);
+for (i in 0..cameras.size) {
+    if (cameras.data[i].kind == CameraKindExternal) { String_from(&usb, cameras.data[i].id.data); }
+}
+camera_devices_free(&cameras);
+...
+CameraDeviceView(Style{height: 360}, usb.data);
+```
+
+| Platform | Listed | `id` | `kind` |
+|---|---|---|---|
+| macOS | `AVCaptureDevice.DiscoverySession`: the built-in camera, external ones (USB), an iPhone's Continuity Camera and each Desk View | `uniqueID` | `CameraKindBuiltIn`, `CameraKindExternal`, `CameraKindContinuity`, `CameraKindDeskView` |
+| iOS | Each lens (wide, ultra wide, telephoto) on each side; an iPad's external camera (iPadOS 17) | `uniqueID` | `CameraKindFront`, `CameraKindBack`, `CameraKindExternal` |
+| Android | Every Camera2 id; named "Front camera 1" and so on (Camera2 has no names) | the Camera2 id | `CameraKindFront`, `CameraKindBack`, `CameraKindExternal` |
+| Web | The browser's video inputs (`enumerateDevices`), kept up to date as devices change | `deviceId` | `CameraKindFront` or `CameraKindBack` where the browser says (`getCapabilities`), else `CameraKindUnknown` |
+| Linux, Windows | Nothing (no live camera) | | |
+
+On the web the list is asked for when the app starts and answered later, and a browser gives
+the names and ids only once the page may use the camera: list again after a `CameraView`
+mounted. An id that is gone (a camera unplugged since it was listed) makes the view report
+`PhotoUnavailable`; `""` opens the back camera, as `CameraView(style, false)`.
+
+The macOS listing and `CameraDeviceView` were run on a Mac with an iPhone near it; iOS,
+Android and the web are checked to compile, not yet run on devices.
 
 ## The example
 

@@ -1,5 +1,11 @@
 # Live frames
 
+> **The handler runs on the UI thread.** While it runs the interface waits. Converting a
+> 1080p frame to RGBA there (two million pixels; in a `ui serve` build, compiled at `-O0`,
+> several times slower) freezes the app. Copy the frame with `CameraFrame_copy_to` (one
+> `memcpy` a plane) and convert or analyze the copy on a worker thread, as in
+> [Threads](#threads), or ask for a smaller size.
+
 `use_camera_frames` hands the mounted `CameraView`'s camera to Eskiu frame by frame, as the
 platform delivers it: YUV planes on iOS and Android, RGBA on the web. It is for code that
 looks at the pictures as they come (a barcode or face detector, a liveness check, a video
@@ -36,6 +42,7 @@ buffer by pointer, and `camera_native_frame_release` gives it back when the hand
 | Platform | Source | Buffer lent to Eskiu |
 |---|---|---|
 | iOS | `AVCaptureVideoDataOutput` on the view's session, `420YpCbCr8BiPlanarFullRange` | The `CVPixelBuffer`, base address locked read-only for the call: NV12 |
+| macOS | The same, its output scaled to the size asked for | The same: NV12 |
 | Android | A `YUV_420_888` `ImageReader` on the view's Camera2 session | The `Image`'s planes (direct buffers, read in place): NV12, NV21, I420 or the general three-plane layout, as the device gives it |
 | Web | The view's `<video>` (getUserMedia), on a timer at the asked rate | The picture drawn into a canvas and read back as RGBA into one buffer in the app's memory, reused |
 
@@ -50,9 +57,68 @@ the one waiting and the one lent. On iOS the output also discards frames that ar
 ### Threads
 
 The handler runs on the UI thread, like every `ui` handler, so it can set signals. Heavy work
-there holds up the interface: convert or copy what you need (`to_rgba` into your own buffer,
-or the planes with `memcpy`) and hand it to a thread of your own, which then reads only your
-copy. A frame's pointers are not valid after the handler returns.
+there holds up the interface. A frame's pointers are not valid after the handler returns, so
+work that takes longer than a frame starts from a copy: `CameraFrame_copy_to(frame, &copy)`
+copies the planes into a `CameraFrameCopy` (its buffer is kept and reused, so a warm copy
+allocates nothing), whose `frame` reads the same way and stays valid until the next copy into
+it or `CameraFrameCopy_free`.
+
+A worker thread with a mailbox of one: the handler copies the newest frame in when the worker
+is free (a frame that comes while it works is dropped, as frames are), and the worker posts
+its result back with `ui_native_emit`, which any thread may call; `use_native_event` gets it
+on the UI thread.
+
+```eskiu
+import <threading>;
+import <camera>;
+
+extern void ui_native_emit(string channel, string payload);
+
+struct Mailbox { Mutex lock; Cond ready; CameraFrameCopy copy; bool full; bool busy; }
+Mailbox box;
+uint8[1280 * 720 * 4] pixels;
+
+void start_worker() {
+    Mutex_init(&box.lock);
+    Cond_init(&box.ready);
+    *Mailbox m = &box;
+    thread_create(void() {
+        while (true) {
+            Mutex_lock(&m.lock);
+            while (!m.full) { Cond_wait(&m.ready, &m.lock); }
+            m.full = false;
+            m.busy = true;
+            Mutex_unlock(&m.lock);
+            // The copy is the worker's until busy is false again.
+            *CameraFrame f = &m.copy.frame;
+            f.to_rgba(&pixels[0], f.out_width(true) * 4, true);
+            // ... run the model on pixels ...
+            ui_native_emit("detections", "3 faces");
+            Mutex_lock(&m.lock);
+            m.busy = false;
+            Mutex_unlock(&m.lock);
+        }
+    });
+}
+
+void Scanner() {
+    CameraView(Style{height: 360}, false);
+    use_camera_frames(CameraFrameOptions{width: 1280, height: 720, fps: 30}, void(*CameraFrame frame) {
+        Mutex_lock(&box.lock);
+        if (!box.busy && !box.full) {
+            frame.copy_to(&box.copy);
+            box.full = true;
+            Cond_signal(&box.ready);
+        }
+        Mutex_unlock(&box.lock);
+    });
+    use_native_event("detections", void(string result) { /* set a signal */ });
+}
+```
+
+The web has one thread: there, keep the work small or the size low. On the native hosts the
+app's code is compiled at `-O0` under `ui serve`; `ui build` and `ui release` compile it at
+`-O2`, so measure a frame's cost there.
 
 ## The API
 
@@ -75,7 +141,11 @@ void use_camera_frames(CameraFrameOptions options, escaping fn(*CameraFrame)->vo
 - **Size.** `width` and `height` in the options are a wish, as the sensor sees it
   (landscape). Android picks the smallest `YUV_420_888` size that holds it; iOS the smallest
   session preset (640x480, 1280x720, 1920x1080, 3840x2160) that holds it; the web scales
-  the video down to fit it, never up. The frame says what you got.
+  the video down to fit it, never up. macOS gives exactly the size asked for: the camera keeps
+  its own format (a 1080p camera stays at 1920x1080 under the 1280x720 preset), and the
+  output scales its picture to the size, cropping it to that shape (centered) when the shapes
+  differ; a size larger than the camera's comes at the camera's size. The frame says what you
+  got.
 - **Rate.** At most `fps` frames a second: Android sets the auto-exposure range with the
   highest top at or under it, iOS the device's minimum frame duration when its format
   allows that rate, the web its timer. In the dark a camera may give fewer.
@@ -126,7 +196,8 @@ textures.
 ## Notes and limits
 
 - Frames come from the mounted `CameraView`; with none mounted, `use_camera_frames` gets
-  nothing. The view may be small. Front or back follows the view.
+  nothing. The view may be small. The camera follows the view (its side, or the device
+  `CameraDeviceView` names).
 - Turning frames on or off, or changing the options, opens the camera's session again, so
   the live view blinks once.
 - On iOS, while frames are on the session runs at their preset, so `camera_capture` photos

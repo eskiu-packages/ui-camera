@@ -113,7 +113,80 @@ void CameraView(Style style, bool front)
 
 The camera, live, filling the box the layout gives it (cropped to it): the back camera, or
 the front one when `front`. The first one mounted asks for the camera permission;
-use_photos gets PhotoDenied or PhotoUnavailable when it cannot show it.
+use_photos gets PhotoDenied or PhotoUnavailable when it cannot show it. A Mac's camera has
+no side: both open the built-in camera (or the system's default); CameraDeviceView opens a
+chosen one.
+
+### CameraKind
+
+```eskiu
+enum CameraKind {
+    CameraKindUnknown, CameraKindFront, CameraKindBack, CameraKindBuiltIn, CameraKindExternal,
+    CameraKindContinuity, CameraKindDeskView
+}
+```
+
+What kind of camera camera_devices lists: a phone's or tablet's front or back camera, a
+computer's built-in one, an external one (USB), an iPhone used as a Mac's camera (Continuity
+Camera), its Desk View, or one the platform does not say (the web).
+
+### CameraDevice
+
+```eskiu
+struct CameraDevice { String id; String name; int kind; }
+```
+
+One camera: `id`, which CameraDeviceView opens (the platform's own: an AVCaptureDevice's
+uniqueID, a Camera2 id, a browser's deviceId), the name the platform gives it, and its kind.
+
+### camera_field
+
+```eskiu
+void camera_field(string text, *int at, *String out)
+```
+
+The text from `*at` up to a tab or the line's end, into `out`; `*at` goes past a tab, and
+stays on a newline.
+
+### camera_devices_parse
+
+```eskiu
+void camera_devices_parse(string text, List<CameraDevice>* out)
+```
+
+"KIND\tID\tNAME" lines as devices, into `out`. A line without an id is left out.
+
+### camera_devices
+
+```eskiu
+void camera_devices(List<CameraDevice>* out)
+```
+
+The cameras CameraDeviceView can open, in the platform's order, into `out` (free them with
+camera_devices_free). macOS lists built-in, external, Continuity and Desk View cameras; iOS
+each lens (front, back, ultra wide, telephoto) and an iPad's external camera; Android every
+Camera2 id with its facing; the web the browser's video inputs (their names and ids only
+once the user allowed the camera, and none before the page has asked: list again after a
+CameraView mounted). Empty on Linux and Windows, and where there is no camera.
+
+### camera_devices_free
+
+```eskiu
+void camera_devices_free(List<CameraDevice>* devices)
+```
+
+Frees the ids and names camera_devices filled `devices` with, and the list.
+
+### CameraDeviceView
+
+```eskiu
+void CameraDeviceView(Style style, string device_id)
+```
+
+The camera `device_id` (a CameraDevice's id) live, as CameraView shows its camera: frames,
+captures and the permission work the same. An id the platform does not have (a camera
+unplugged since it was listed) gives use_photos PhotoUnavailable; "" opens CameraView's
+back camera.
 
 ### CameraFormat
 
@@ -233,9 +306,41 @@ void use_camera_frames(CameraFrameOptions options, escaping fn(*CameraFrame)->vo
 
 `on_frame` gets the mounted CameraView's frames while the scope is mounted, on the UI
 thread; the frame and its planes are borrowed for the call (convert or copy what you keep).
+Keep it short: the UI waits while it runs. A full-size conversion (to_rgba of a 1080p frame
+is two million pixels) or a model's inference belongs on a worker thread: copy the frame
+there with copy_to (docs/frames.md), or ask for a smaller size.
 A frame that arrives while it runs replaces the one waiting: a slow handler gets fewer,
 newer frames, never a queue. A CameraView must be mounted for frames to come (it may be
 small); new options are applied when they change.
+
+### CameraFrameCopy
+
+```eskiu
+struct CameraFrameCopy { CameraFrame frame; *uint8 data; int64 capacity; }
+```
+
+An owned copy of a frame, to work on outside the handler (another thread, a later frame):
+`frame` describes the copy, its planes pointing into `data`, which is kept and grown from
+one copy to the next so copying each frame allocates nothing once warm. Free it with
+CameraFrameCopy_free. docs/frames.md has the pattern for a worker thread.
+
+### CameraFrame_copy_to
+
+```eskiu
+bool CameraFrame_copy_to(*CameraFrame self, *CameraFrameCopy out)
+```
+
+`self`'s planes copied into `out` (one memcpy a plane: about 3 MB for a 1080p NV12 frame,
+far less than converting it), so `out.frame` stays valid after the handler returns. False
+when the buffer could not grow (out keeps its last copy).
+
+### CameraFrameCopy_free
+
+```eskiu
+void CameraFrameCopy_free(*CameraFrameCopy self)
+```
+
+Frees the copy's buffer; the copy is empty after (copy_to may fill it again).
 
 ### CameraYuvCoeffs
 

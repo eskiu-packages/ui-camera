@@ -86,7 +86,15 @@ void Shoot() {
 | `camera_take_photo()` | The system's camera app. |
 | `CameraView(Style, bool front)` | The camera, live, filling its box (cropped): the back camera, or the front one. The first one mounted asks for the camera permission. |
 | `camera_capture()` | What the mounted `CameraView` shows now, as a photo. |
-| `use_camera_frames(CameraFrameOptions, fn(*CameraFrame))` | The `CameraView`'s live frames, borrowed by pointer for the call: YUV planes (RGBA on the web), newest frame wins. See [Live frames](docs/frames.md). |
+| `camera_devices(List<CameraDevice>*)` | The cameras: each one's `id`, `name` and `kind` (`CameraKindFront`, `CameraKindBack`, `CameraKindBuiltIn`, `CameraKindExternal`, `CameraKindContinuity`, `CameraKindDeskView` or `CameraKindUnknown`). Free them with `camera_devices_free`. [Choosing a camera](docs/README.md#choosing-a-camera). |
+| `CameraDeviceView(Style, string id)` | A `CameraView` of the camera with that id (a Mac's USB camera, an iPhone's Continuity Camera, a phone's ultra-wide lens). |
+| `use_camera_frames(CameraFrameOptions, fn(*CameraFrame))` | The `CameraView`'s live frames, borrowed by pointer for the call: YUV planes (RGBA on the web), newest frame wins. The handler runs on the UI thread: copy the frame (`copy_to`) and convert it on a worker. See [Live frames](docs/frames.md). |
+
+> **Frames run on the UI thread.** `use_camera_frames`' handler blocks the interface while it
+> runs. Converting a 1080p frame to RGBA there (two million pixels, slower still in a `ui
+> serve` build, which compiles the app at `-O0`) freezes the app: copy the frame with
+> `CameraFrame_copy_to` and do the work on a thread of your own, or ask for a smaller size.
+> [The pattern](docs/frames.md#threads).
 
 ## Status
 

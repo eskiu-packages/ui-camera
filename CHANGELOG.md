@@ -5,7 +5,27 @@ All notable changes to this package are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- `camera_devices(&list)` lists the cameras (`CameraDevice`: `id`, `name`, `kind`) and
+  `CameraDeviceView(style, id)` shows one: on macOS the built-in camera, external (USB) ones,
+  Continuity Camera and Desk View; on iOS each lens; on Android each Camera2 id; on the web the
+  browser's video inputs. `CameraView(style, front)` is unchanged.
+- `CameraFrame_copy_to(frame, &copy)`: an owned copy of a frame (`CameraFrameCopy`, its buffer
+  reused) to convert or analyze on a worker thread; docs/frames.md has the pattern.
+- macOS: `ui agent`'s screenshot shows the camera (the view gives its latest frame through
+  ui's `UiNativeSnapshot`; it was black). The frame for it is kept only under the driver
+  (`ui serve`, `ui agent`, `ui test`) when frames are off.
+
+### Fixed
+
+- macOS: `use_camera_frames` asked for 1280x720 got 1920x1080 (the camera keeps its format
+  under the session preset): the output scales to the size asked for, cropping to its shape.
+
 ### Changed
+
+- The docs say up front that `use_camera_frames`' handler runs on the UI thread and that a
+  full-size conversion there freezes the app (worse at `-O0` under `ui serve`).
 
 - The README says which platforms have the camera (the live camera on the Linux and Windows
   desktops only in a `--webview` build), how an unsupported one reports it, and that the
