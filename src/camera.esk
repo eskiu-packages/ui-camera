@@ -101,9 +101,91 @@ void camera_capture() { camera_native_capture(); }
 
 // The camera, live, filling the box the layout gives it (cropped to it): the back camera, or
 // the front one when `front`. The first one mounted asks for the camera permission;
-// use_photos gets PhotoDenied or PhotoUnavailable when it cannot show it.
+// use_photos gets PhotoDenied or PhotoUnavailable when it cannot show it. A Mac's camera has
+// no side: both open the built-in camera (or the system's default); CameraDeviceView opens a
+// chosen one.
 void CameraView(Style style, bool front) {
     ui_native_prop("facing", front ? "front" : "back");
+    NativeView(style, "camera", void(string name, string payload) {});
+}
+
+// What kind of camera camera_devices lists: a phone's or tablet's front or back camera, a
+// computer's built-in one, an external one (USB), an iPhone used as a Mac's camera (Continuity
+// Camera), its Desk View, or one the platform does not say (the web).
+enum CameraKind {
+    CameraKindUnknown, CameraKindFront, CameraKindBack, CameraKindBuiltIn, CameraKindExternal,
+    CameraKindContinuity, CameraKindDeskView
+}
+
+// One camera: `id`, which CameraDeviceView opens (the platform's own: an AVCaptureDevice's
+// uniqueID, a Camera2 id, a browser's deviceId), the name the platform gives it, and its kind.
+struct CameraDevice { String id; String name; int kind; }
+
+// The platform's side of camera_devices: the cameras as "KIND\tID\tNAME" lines, written into
+// `out` (at most `capacity` bytes, NUL included); returns the length the whole list needs.
+extern int camera_native_devices(*char out, int capacity);
+
+// The text from `*at` up to a tab or the line's end, into `out`; `*at` goes past a tab, and
+// stays on a newline.
+void camera_field(string text, *int at, *String out) {
+    int start = *at;
+    int end = start;
+    while (text[end] != 0 && text[end] != '\t' && text[end] != '\n') { end++; }
+    String_append_bytes(out, (*char)&text[start], (int64)(end - start));
+    *at = text[end] == '\t' ? end + 1 : end;
+}
+
+// "KIND\tID\tNAME" lines as devices, into `out`. A line without an id is left out.
+void camera_devices_parse(string text, List<CameraDevice>* out) {
+    int at = 0;
+    while (text[at] != 0) {
+        int kind = 0;
+        while (text[at] >= '0' && text[at] <= '9') { kind = kind * 10 + (text[at] - '0'); at++; }
+        CameraDevice device = CameraDevice{};
+        if (text[at] == '\t') {
+            at++;
+            camera_field(text, &at, &device.id);
+            camera_field(text, &at, &device.name);
+        }
+        while (text[at] != 0 && text[at] != '\n') { at++; }
+        if (text[at] == '\n') { at++; }
+        if (device.id.len == 0) { String_free(&device.id); String_free(&device.name); continue; }
+        if (device.name.data == null) { String_from(&device.name, ""); }
+        device.kind = kind >= CameraKindUnknown && kind <= CameraKindDeskView ? kind : CameraKindUnknown;
+        out.push(device);
+    }
+}
+
+// The cameras CameraDeviceView can open, in the platform's order, into `out` (free them with
+// camera_devices_free). macOS lists built-in, external, Continuity and Desk View cameras; iOS
+// each lens (front, back, ultra wide, telephoto) and an iPad's external camera; Android every
+// Camera2 id with its facing; the web the browser's video inputs (their names and ids only
+// once the user allowed the camera, and none before the page has asked: list again after a
+// CameraView mounted). Empty on Linux and Windows, and where there is no camera.
+void camera_devices(List<CameraDevice>* out) {
+    char[4096] small;
+    int need = camera_native_devices(&small[0], 4096);
+    if (need <= 0) { return; }
+    if (need < 4096) { camera_devices_parse((string)&small[0], out); return; }
+    *char big = alloc<char>((int64)need + 1);
+    camera_native_devices(big, need + 1);
+    camera_devices_parse((string)big, out);
+    free(big);
+}
+
+// Frees the ids and names camera_devices filled `devices` with, and the list.
+void camera_devices_free(List<CameraDevice>* devices) {
+    for (i in 0..devices.size) { String_free(&devices.data[i].id); String_free(&devices.data[i].name); }
+    devices.free();
+}
+
+// The camera `device_id` (a CameraDevice's id) live, as CameraView shows its camera: frames,
+// captures and the permission work the same. An id the platform does not have (a camera
+// unplugged since it was listed) gives use_photos PhotoUnavailable; "" opens CameraView's
+// back camera.
+void CameraDeviceView(Style style, string device_id) {
+    ui_native_prop("facing", "back");
+    ui_native_prop("device", device_id == null ? "" : device_id);
     NativeView(style, "camera", void(string name, string payload) {});
 }
 
@@ -245,6 +327,9 @@ void camera_deliver_frame(fn(*CameraFrame)->void handler) {
 
 // `on_frame` gets the mounted CameraView's frames while the scope is mounted, on the UI
 // thread; the frame and its planes are borrowed for the call (convert or copy what you keep).
+// Keep it short: the UI waits while it runs. A full-size conversion (to_rgba of a 1080p frame
+// is two million pixels) or a model's inference belongs on a worker thread: copy the frame
+// there with copy_to (docs/frames.md), or ask for a smaller size.
 // A frame that arrives while it runs replaces the one waiting: a slow handler gets fewer,
 // newer frames, never a queue. A CameraView must be mounted for frames to come (it may be
 // small); new options are applied when they change.
@@ -272,6 +357,41 @@ void use_camera_frames(CameraFrameOptions options, escaping fn(*CameraFrame)->vo
         camera_frame_users--;
         if (camera_frame_users == 0) { camera_native_frames(0, 0, 0, 0); }
     });
+}
+
+// An owned copy of a frame, to work on outside the handler (another thread, a later frame):
+// `frame` describes the copy, its planes pointing into `data`, which is kept and grown from
+// one copy to the next so copying each frame allocates nothing once warm. Free it with
+// CameraFrameCopy_free. docs/frames.md has the pattern for a worker thread.
+struct CameraFrameCopy { CameraFrame frame; *uint8 data; int64 capacity; }
+
+// `self`'s planes copied into `out` (one memcpy a plane: about 3 MB for a 1080p NV12 frame,
+// far less than converting it), so `out.frame` stays valid after the handler returns. False
+// when the buffer could not grow (out keeps its last copy).
+bool CameraFrame_copy_to(*CameraFrame self, *CameraFrameCopy out) {
+    int64 total = 0;
+    for (i in 0..self.plane_count) { total += self.planes[i].size; }
+    if (total > out.capacity) {
+        *uint8 grown = alloc<uint8>(total);
+        if (grown == null) { return false; }
+        free(out.data);
+        out.data = grown;
+        out.capacity = total;
+    }
+    out.frame = *self;
+    int64 at = 0;
+    for (i in 0..self.plane_count) {
+        memcpy(out.data + at, self.planes[i].data, (size_t)self.planes[i].size);
+        out.frame.planes[i].data = out.data + at;
+        at += self.planes[i].size;
+    }
+    return true;
+}
+
+// Frees the copy's buffer; the copy is empty after (copy_to may fill it again).
+void CameraFrameCopy_free(*CameraFrameCopy self) {
+    free(self.data);
+    *self = CameraFrameCopy{};
 }
 
 // The fixed-point (1 << 16) coefficients that turn one matrix and range's YUV into RGB.

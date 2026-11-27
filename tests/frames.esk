@@ -41,6 +41,8 @@ void camera_native_frame_release() { releases++; }
 // The desktop's native side, where camera_supported asks it (macOS): no camera here.
 int camera_native_supported() { return 0; }
 
+int camera_native_devices(*char out, int capacity) { return 0; }
+
 void check(bool ok, string what) {
     if (!ok) {
         printf("FAIL %s\n", what);
@@ -171,6 +173,18 @@ void layouts() {
     check(camera_frame_read(&info[0], &frame), "NV12 reads");
     check(frame.width == 4 && frame.height == 2 && frame.timestamp_ns == 123456789 && frame.full_range, "NV12 fields");
     matches(&frame, false, "NV12 pixels");
+    // A copy outlives the platform's buffer: the same bytes in its own memory, which the next
+    // copy reuses.
+    CameraFrameCopy copy;
+    check(frame.copy_to(&copy), "a copy");
+    check(copy.frame.planes[0].data != &y12[0] && copy.frame.planes[1].data == copy.data + 12, "the copy's planes are its own");
+    check(memcmp(copy.frame.planes[0].data, &y12[0], 12) == 0 && memcmp(copy.frame.planes[1].data, &uv[0], 4) == 0, "the copy's bytes");
+    check(copy.frame.width == 4 && copy.frame.format == CameraNV12 && copy.frame.planes[1].pixel_stride == 2, "the copy's fields");
+    matches(&copy.frame, false, "the copy's pixels");
+    *uint8 first = copy.data;
+    check(frame.copy_to(&copy) && copy.data == first, "a second copy reuses the buffer");
+    copy.free();
+    check(copy.data == null && copy.capacity == 0, "a freed copy");
     for (r in 0..4) {
         info[4] = r * 90;
         check(camera_frame_read(&info[0], &frame), "NV12 turned reads");

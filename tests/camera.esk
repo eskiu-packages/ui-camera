@@ -23,6 +23,20 @@ void camera_native_frame_release() {}
 // The desktop's native side, where camera_supported asks it (macOS): no camera here.
 int camera_native_supported() { return 0; }
 
+// The cameras a Mac with an iPhone near it lists, and a malformed line the parser skips.
+string device_list = "3\t0x1420000005ac8600\tFaceTime HD Camera\n5\tA1B2-C3\tEduardo's iPhone Camera\n"
+                     "6\tA1B2-C4\tEduardo's iPhone Desk View Camera\n9\todd\tA kind from later\nbroken line\n4\tusb-1\t\n";
+
+int camera_native_devices(*char out, int capacity) {
+    int n = (int)strlen(device_list);
+    if (capacity > 0) {
+        int copy = n < capacity - 1 ? n : capacity - 1;
+        memcpy(out, device_list, (size_t)copy);
+        out[copy] = 0;
+    }
+    return n;
+}
+
 String last;
 int photos;
 int native_views;
@@ -48,6 +62,7 @@ void Screen() {
             else { String_from(&last, "failed"); }
         });
         CameraView(Style{width: 300, height: 400}, false);
+        CameraDeviceView(Style{width: 100, height: 100}, "A1B2-C3");
     }
 }
 
@@ -68,7 +83,17 @@ int main() {
         if (mounted.get() > 0) { Screen(); }
     }
     ui_frame();
-    check(native_views == 1, "CameraView is a native view");
+    check(native_views == 2, "CameraView and CameraDeviceView are native views");
+
+    List<CameraDevice> devices;
+    camera_devices(&devices);
+    check(devices.size == 5, "five cameras listed, the broken line left out");
+    check(String_eq_cstr(&devices.data[0].id, "0x1420000005ac8600") == 1 && devices.data[0].kind == CameraKindBuiltIn, "a built-in camera");
+    check(String_eq_cstr(&devices.data[1].name, "Eduardo's iPhone Camera") == 1 && devices.data[1].kind == CameraKindContinuity, "Continuity Camera");
+    check(devices.data[2].kind == CameraKindDeskView, "Desk View");
+    check(devices.data[3].kind == CameraKindUnknown, "an unknown kind");
+    check(String_eq_cstr(&devices.data[4].id, "usb-1") == 1 && devices.data[4].name.len == 0 && devices.data[4].kind == CameraKindExternal, "an external camera with no name");
+    camera_devices_free(&devices);
 
     camera_pick_photo();
     camera_take_photo();
