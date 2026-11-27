@@ -140,6 +140,12 @@ int camera_native_frame_acquire(int64_t *info) {
 
 void camera_native_frame_release(void) {}
 
+// No camera to list (camera_devices is empty here).
+int camera_native_devices(char *out, int capacity) {
+    if (capacity > 0) out[0] = 0;
+    return 0;
+}
+
 // The "camera" view: an empty child window that says, once mounted, that there is no camera.
 static void CALLBACK report(HWND view, UINT message, UINT_PTR timer, DWORD time) {
     (void)message;

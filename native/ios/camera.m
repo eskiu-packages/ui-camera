@@ -126,6 +126,37 @@ static AVCaptureSessionPreset framePreset(int width, int height) {
     return AVCaptureSessionPreset3840x2160;
 }
 
+// Each lens the device has (front, back wide, ultra wide, telephoto) and, on iPadOS 17, an
+// external camera.
+static NSArray<AVCaptureDevice *> *cameraList(void) {
+    NSMutableArray<AVCaptureDeviceType> *types = [NSMutableArray arrayWithArray:@[
+        AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeBuiltInUltraWideCamera,
+        AVCaptureDeviceTypeBuiltInTelephotoCamera]];
+    if (@available(iOS 17.0, *)) [types addObject:AVCaptureDeviceTypeExternal];
+    return [AVCaptureDeviceDiscoverySession discoverySessionWithDeviceTypes:types mediaType:AVMediaTypeVideo
+                                                                    position:AVCaptureDevicePositionUnspecified].devices;
+}
+
+// "KIND\tID\tNAME" lines into `out` (camera_devices in src/camera.esk): kind 1 front, 2 back,
+// 4 external. The length they need.
+int camera_native_devices(char *out, int capacity) {
+    NSMutableString *text = [NSMutableString string];
+    for (AVCaptureDevice *device in cameraList()) {
+        int kind = device.position == AVCaptureDevicePositionFront ? 1 : device.position == AVCaptureDevicePositionBack ? 2 : 4;
+        NSString *name = [[device.localizedName ?: @"" componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                          componentsJoinedByString:@" "];
+        [text appendFormat:@"%d\t%@\t%@\n", kind, device.uniqueID, name];
+    }
+    const char *bytes = text.UTF8String;
+    int length = (int)strlen(bytes);
+    if (capacity > 0) {
+        int copy = MIN(length, capacity - 1);
+        memcpy(out, bytes, (size_t)copy);
+        out[copy] = 0;
+    }
+    return length;
+}
+
 // The live view: a session on the chosen camera, its preview filling the view (cropped).
 @interface EskiuCameraView : UIView <AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate>
 @property(nonatomic, strong) AVCaptureSession *session;
@@ -133,6 +164,8 @@ static AVCaptureSessionPreset framePreset(int width, int height) {
 @property(nonatomic) BOOL front;
 @property(nonatomic, strong) AVCapturePhotoOutput *output;
 @property(nonatomic, copy) NSString *facing;
+// A camera's uniqueID (CameraDeviceView), or "" for `facing`'s.
+@property(nonatomic, copy) NSString *deviceId;
 @end
 
 // The queue sessions start and stop on, in order.
@@ -151,8 +184,9 @@ static __weak EskiuCameraView *live;
 - (void)start {
     [self stop];
     AVCaptureDevicePosition position = [self.facing isEqualToString:@"front"] ? AVCaptureDevicePositionFront : AVCaptureDevicePositionBack;
-    AVCaptureDevice *device = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
-                                                                 mediaType:AVMediaTypeVideo position:position];
+    AVCaptureDevice *device = self.deviceId.length ? [AVCaptureDevice deviceWithUniqueID:self.deviceId]
+        : [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera mediaType:AVMediaTypeVideo position:position];
+    if (device) position = device.position;
     AVCaptureDeviceInput *input = device ? [AVCaptureDeviceInput deviceInputWithDevice:device error:nil] : nil;
     if (!input) { emit(@"unavailable"); return; }
     AVCaptureSession *session = [AVCaptureSession new];
@@ -328,6 +362,9 @@ UI_NATIVE_SETUP(camera) {
         EskiuCameraView *camera = (EskiuCameraView *)view;
         if ([name isEqualToString:@"facing"] && ![value isEqualToString:camera.facing]) {
             camera.facing = value.length ? value : @"back";
+            if (camera.session) [camera start];
+        } else if ([name isEqualToString:@"device"] && ![value isEqualToString:camera.deviceId ?: @""]) {
+            camera.deviceId = value;
             if (camera.session) [camera start];
         }
     });

@@ -83,6 +83,26 @@ export function setup(ui) {
   };
   const emitFrame = () => ui.emit('camera_frame', 'frame');
 
+  // The video inputs for camera_devices, kept up to date: enumerateDevices answers later, and
+  // gives names and ids only once the page may use the camera, so it is asked again when the
+  // devices change and after a view got its stream. Kind 1 front, 2 back, 0 unknown.
+  window.eskiuCamera.devices = [];
+  const listDevices = () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    navigator.mediaDevices.enumerateDevices().then(all => {
+      window.eskiuCamera.devices = all.filter(d => d.kind === 'videoinput' && d.deviceId).map((d, i) => {
+        const caps = typeof d.getCapabilities === 'function' ? d.getCapabilities() : {};
+        const facing = (caps && caps.facingMode) || [];
+        return {id: d.deviceId, name: d.label || `Camera ${i + 1}`,
+                kind: facing.includes('user') ? 1 : facing.includes('environment') ? 2 : 0};
+      });
+    }).catch(() => {});
+  };
+  listDevices();
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', listDevices);
+  }
+
   ui.registerView('camera', {
     create() {
       const video = document.createElement('video');
@@ -91,19 +111,30 @@ export function setup(ui) {
       video.playsInline = true;
       Object.assign(video.style, {width: '100%', height: '100%', objectFit: 'cover', background: '#000'});
       let stream = null;
+      // A chosen device (CameraDeviceView) wins over the facing.
+      let device = '';
       const start = facing => {
         if (stream) stream.getTracks().forEach(track => track.stop());
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { emit('unavailable'); return; }
-        navigator.mediaDevices.getUserMedia({video: {facingMode: facing === 'front' ? 'user' : 'environment'}})
-          .then(s => { stream = s; video.srcObject = s; live = video; liveFront = facing === 'front'; })
+        const constraints = device ? {deviceId: {exact: device}} : {facingMode: facing === 'front' ? 'user' : 'environment'};
+        navigator.mediaDevices.getUserMedia({video: constraints})
+          .then(s => {
+            stream = s; video.srcObject = s; live = video;
+            const settings = s.getVideoTracks()[0] ? s.getVideoTracks()[0].getSettings() : {};
+            liveFront = device ? settings.facingMode === 'user' : facing === 'front';
+            listDevices();
+          })
           .catch(error => emit(error && error.name === 'NotAllowedError' ? 'denied' : 'unavailable'));
       };
       let facing = 'back';
-      start(facing);
+      // The first start waits a turn, so a "device" prop set with the view comes first.
+      let started = false;
+      queueMicrotask(() => { if (!started) { started = true; start(facing); } });
       return {
         element: video,
         set(name, value) {
-          if (name === 'facing' && (value || 'back') !== facing) { facing = value || 'back'; start(facing); }
+          if (name === 'facing' && (value || 'back') !== facing) { facing = value || 'back'; if (started) start(facing); }
+          if (name === 'device' && (value || '') !== device) { device = value || ''; if (started) start(facing); }
         },
         dispose() {
           if (stream) stream.getTracks().forEach(track => track.stop());

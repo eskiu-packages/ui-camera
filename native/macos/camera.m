@@ -4,8 +4,11 @@
 // Every photo is saved upright, at most 2048 pixels on its longer side, as a JPEG in the caches
 // directory; results go to the "camera" channel (src/camera.esk). Live frames come from the
 // view's AVCaptureVideoDataOutput as NV12 pixel buffers, lent to Eskiu by pointer, upright as
-// they are (rotation 0).
+// they are (rotation 0), at the size asked for (the output scales and crops to it).
+// camera_native_devices lists the cameras (built in, external, Continuity Camera, Desk View),
+// and a view with a "device" prop opens that one.
 #import <AVFoundation/AVFoundation.h>
+#import <CoreImage/CoreImage.h>
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <os/lock.h>
@@ -107,6 +110,58 @@ static AVCaptureSessionPreset framePreset(int width, int height) {
     return AVCaptureSessionPreset3840x2160;
 }
 
+// The cameras a Mac can show: built in, external (USB), an iPhone's (Continuity Camera) and
+// its Desk View.
+static NSArray<AVCaptureDevice *> *cameraList(void) {
+    NSMutableArray<AVCaptureDeviceType> *types = [NSMutableArray arrayWithObject:AVCaptureDeviceTypeBuiltInWideAngleCamera];
+    if (@available(macOS 14.0, *)) {
+        [types addObject:AVCaptureDeviceTypeExternal];
+        [types addObject:AVCaptureDeviceTypeContinuityCamera];
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [types addObject:AVCaptureDeviceTypeExternalUnknown];
+#pragma clang diagnostic pop
+    }
+    if (@available(macOS 13.0, *)) [types addObject:AVCaptureDeviceTypeDeskViewCamera];
+    return [AVCaptureDeviceDiscoverySession discoverySessionWithDeviceTypes:types mediaType:AVMediaTypeVideo
+                                                                    position:AVCaptureDevicePositionUnspecified].devices;
+}
+
+// A CameraKind (src/camera.esk): 1 front, 2 back, 3 built in, 4 external, 5 Continuity
+// Camera, 6 Desk View.
+static int cameraKind(AVCaptureDevice *device) {
+    if (@available(macOS 13.0, *)) {
+        if ([device.deviceType isEqualToString:AVCaptureDeviceTypeDeskViewCamera]) return 6;
+        if (device.continuityCamera) return 5;
+    }
+    if ([device.deviceType isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) {
+        if (device.position == AVCaptureDevicePositionFront) return 1;
+        if (device.position == AVCaptureDevicePositionBack) return 2;
+        return 3;
+    }
+    return 4;
+}
+
+// "KIND\tID\tNAME" lines into `out` (camera_devices in src/camera.esk); the length they need.
+int camera_native_devices(char *out, int capacity) {
+    NSMutableString *text = [NSMutableString string];
+    for (AVCaptureDevice *device in cameraList()) {
+        NSString *name = [[device.localizedName ?: @"" componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]
+                          componentsJoinedByString:@" "];
+        name = [name stringByReplacingOccurrencesOfString:@"\t" withString:@" "];
+        [text appendFormat:@"%d\t%@\t%@\n", cameraKind(device), device.uniqueID, name];
+    }
+    const char *bytes = text.UTF8String;
+    int length = (int)strlen(bytes);
+    if (capacity > 0) {
+        int copy = MIN(length, capacity - 1);
+        memcpy(out, bytes, (size_t)copy);
+        out[copy] = 0;
+    }
+    return length;
+}
+
 // The camera for `facing`: one at that position, else the system's default camera (a Mac's
 // built-in camera faces the user; an external one has no position).
 static AVCaptureDevice *cameraFacing(NSString *facing) {
@@ -123,7 +178,18 @@ static AVCaptureDevice *cameraFacing(NSString *facing) {
 @property(nonatomic) BOOL front;
 @property(nonatomic, strong) AVCapturePhotoOutput *output;
 @property(nonatomic, copy) NSString *facing;
+// A camera's uniqueID (CameraDeviceView), or "" for `facing`'s.
+@property(nonatomic, copy) NSString *deviceId;
+// The latest frame for uiSnapshot (`ui agent`'s screenshot), under frameLock.
+@property(nonatomic) CVPixelBufferRef snapshot;
 @end
+
+// Whether the app runs under `ui agent` or `ui test` (ui serve's launch gives it the driver's
+// port): only then is a frame kept for screenshots while frames are off.
+static bool driven(void) {
+    const char *port = getenv("UI_AGENT_PORT");
+    return port && *port;
+}
 
 static dispatch_queue_t sessionQueue(void) {
     static dispatch_queue_t queue;
@@ -151,7 +217,7 @@ static __weak EskiuCameraView *live;
 }
 - (void)start {
     [self stop];
-    AVCaptureDevice *device = cameraFacing(self.facing);
+    AVCaptureDevice *device = self.deviceId.length ? [AVCaptureDevice deviceWithUniqueID:self.deviceId] : cameraFacing(self.facing);
     AVCaptureDeviceInput *input = device ? [AVCaptureDeviceInput deviceInputWithDevice:device error:nil] : nil;
     if (!input) { emit(@"unavailable"); return; }
     AVCaptureSession *session = [AVCaptureSession new];
@@ -165,15 +231,24 @@ static __weak EskiuCameraView *live;
     [session addOutput:output];
     self.frames = nil;
     self.front = device.position == AVCaptureDevicePositionFront;
-    if (wanted.on) {
+    if (wanted.on || driven()) {
+        // The session's preset may give a larger size than asked (a 1080p camera keeps 1920x1080
+        // under the 1280x720 preset), so the output scales to the size asked for, cropping to
+        // its shape when the camera's differs; never above the camera's own size. Under the
+        // driver with frames off, a small one feeds screenshots only.
+        CMVideoDimensions full = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription);
+        int width = wanted.on ? wanted.width : 640, height = wanted.on ? wanted.height : 360;
+        if (width <= 0 || height <= 0 || width > full.width || height > full.height) { width = full.width; height = full.height; }
         AVCaptureVideoDataOutput *frames = [AVCaptureVideoDataOutput new];
-        frames.videoSettings = @{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)};
+        frames.videoSettings = @{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+                                 (id)kCVPixelBufferWidthKey: @(width & ~1), (id)kCVPixelBufferHeightKey: @(height & ~1),
+                                 AVVideoScalingModeKey: AVVideoScalingModeResizeAspectFill};
         frames.alwaysDiscardsLateVideoFrames = YES;
         static dispatch_queue_t queue;
         if (!queue) queue = dispatch_queue_create("org.eskiu.camera.frames", DISPATCH_QUEUE_SERIAL);
         [frames setSampleBufferDelegate:self queue:queue];
         if ([session canAddOutput:frames]) { [session addOutput:frames]; self.frames = frames; }
-        if (wanted.fps > 0 && [device lockForConfiguration:nil]) {
+        if (wanted.on && wanted.fps > 0 && [device lockForConfiguration:nil]) {
             for (AVFrameRateRange *range in device.activeFormat.videoSupportedFrameRateRanges) {
                 if (wanted.fps >= range.minFrameRate && wanted.fps <= range.maxFrameRate) {
                     device.activeVideoMinFrameDuration = CMTimeMake(1, wanted.fps);
@@ -195,7 +270,15 @@ static __weak EskiuCameraView *live;
     [self.frames setSampleBufferDelegate:nil queue:NULL];
     self.frames = nil;
     dropLatest();
+    os_unfair_lock_lock(&frameLock);
+    CVPixelBufferRef old = _snapshot;
+    _snapshot = NULL;
+    os_unfair_lock_unlock(&frameLock);
+    if (old) CVPixelBufferRelease(old);
     if (session) dispatch_sync(sessionQueue(), ^{ [session stopRunning]; });
+}
+- (void)dealloc {
+    if (_snapshot) CVPixelBufferRelease(_snapshot);
 }
 - (void)viewDidMoveToWindow {
     [super viewDidMoveToWindow];
@@ -207,7 +290,14 @@ static __weak EskiuCameraView *live;
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sample fromConnection:(AVCaptureConnection *)connection {
     (void)connection;
     CVPixelBufferRef buffer = CMSampleBufferGetImageBuffer(sample);
-    if (!buffer || !wanted.on || output != _frames) return;
+    if (!buffer || output != _frames) return;
+    CVPixelBufferRetain(buffer);
+    os_unfair_lock_lock(&frameLock);
+    CVPixelBufferRef shown = _snapshot;
+    _snapshot = buffer;
+    os_unfair_lock_unlock(&frameLock);
+    if (shown) CVPixelBufferRelease(shown);
+    if (!wanted.on) return;
     CVPixelBufferRetain(buffer);
     CMTime time = CMSampleBufferGetPresentationTimeStamp(sample);
     os_unfair_lock_lock(&frameLock);
@@ -220,6 +310,33 @@ static __weak EskiuCameraView *live;
     os_unfair_lock_unlock(&frameLock);
     if (old) CVPixelBufferRelease(old);
     if (post) ui_native_emit("camera_frame", "frame");
+}
+// The latest frame as the preview shows it (cropped to the view, mirrored when the preview
+// is), for `ui agent`'s screenshot, which cannot see the preview layer (UiNativeSnapshot in
+// the ui host's ui_native.h).
+- (NSImage *)uiSnapshot {
+    os_unfair_lock_lock(&frameLock);
+    CVPixelBufferRef buffer = _snapshot;
+    if (buffer) CVPixelBufferRetain(buffer);
+    os_unfair_lock_unlock(&frameLock);
+    NSSize size = self.bounds.size;
+    if (!buffer || size.width < 1 || size.height < 1) { if (buffer) CVPixelBufferRelease(buffer); return nil; }
+    CIImage *image = [CIImage imageWithCVPixelBuffer:buffer];
+    CVPixelBufferRelease(buffer);
+    CGRect extent = image.extent;
+    CGFloat scale = MAX(size.width / extent.size.width, size.height / extent.size.height);
+    CGFloat w = size.width / scale, h = size.height / scale;
+    CGRect crop = CGRectMake(extent.origin.x + (extent.size.width - w) / 2, extent.origin.y + (extent.size.height - h) / 2, w, h);
+    image = [image imageByCroppingToRect:crop];
+    if (self.preview.connection.videoMirrored)
+        image = [image imageByApplyingTransform:CGAffineTransformMakeScale(-1, 1)];
+    static CIContext *context;
+    if (!context) context = [CIContext context];
+    CGImageRef cg = [context createCGImage:image fromRect:image.extent];
+    if (!cg) return nil;
+    NSImage *out = [[NSImage alloc] initWithCGImage:cg size:size];
+    CGImageRelease(cg);
+    return out;
 }
 - (void)capture {
     if (!self.session) { emit(@"unavailable"); return; }
@@ -308,6 +425,9 @@ UI_NATIVE_SETUP(camera) {
         EskiuCameraView *camera = (EskiuCameraView *)view;
         if ([name isEqualToString:@"facing"] && ![value isEqualToString:camera.facing]) {
             camera.facing = value.length ? value : @"back";
+            if (camera.session) [camera start];
+        } else if ([name isEqualToString:@"device"] && ![value isEqualToString:camera.deviceId ?: @""]) {
+            camera.deviceId = value;
             if (camera.session) [camera start];
         }
     });

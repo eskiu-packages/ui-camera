@@ -31,6 +31,30 @@ public final class EskiuCamera {
 
     static void emit(String payload) { UiActivity.emit("camera", payload); }
 
+    // camera_devices (camera.c): every Camera2 id as "KIND\tID\tNAME" lines, kind 1 front,
+    // 2 back, 4 external. Camera2 gives no names: "Front camera" and so on, with the id when
+    // there are several of a kind.
+    public static String devices() {
+        UiActivity activity = UiActivity.current();
+        if (activity == null) return "";
+        StringBuilder out = new StringBuilder();
+        try {
+            android.hardware.camera2.CameraManager manager =
+                (android.hardware.camera2.CameraManager)activity.getSystemService(android.content.Context.CAMERA_SERVICE);
+            for (String id : manager.getCameraIdList()) {
+                Integer lens = manager.getCameraCharacteristics(id).get(android.hardware.camera2.CameraCharacteristics.LENS_FACING);
+                int kind = 4;
+                String name = "External camera";
+                if (lens != null && lens == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT) { kind = 1; name = "Front camera"; }
+                else if (lens != null && lens == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK) { kind = 2; name = "Back camera"; }
+                out.append(kind).append('\t').append(id).append('\t').append(name).append(" ").append(id).append('\n');
+            }
+        } catch (Exception error) {
+            return out.toString();
+        }
+        return out.toString();
+    }
+
     public static void pick() {
         Intent intent;
         if (Build.VERSION.SDK_INT >= 33) {

@@ -21,6 +21,33 @@ int camera_native_supported(void) {
     return has ? 1 : 0;
 }
 
+// EskiuCamera.devices()'s lines, UTF-8, into `out` (camera_devices in src/camera.esk): the
+// length they need.
+int camera_native_devices(char *out, int capacity) {
+    if (capacity > 0) out[0] = 0;
+    JNIEnv *env = ui_jni_env();
+    jclass type = ui_find_class("org.eskiu.camera.EskiuCamera");
+    if (!type) return 0;
+    jstring text = (jstring)(*env)->CallStaticObjectMethod(env, type,
+        (*env)->GetStaticMethodID(env, type, "devices", "()Ljava/lang/String;"));
+    (*env)->DeleteLocalRef(env, type);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); text = NULL; }
+    if (!text) return 0;
+    const char *bytes = (*env)->GetStringUTFChars(env, text, NULL);
+    int length = 0;
+    if (bytes) {
+        while (bytes[length]) length++;
+        if (capacity > 0) {
+            int copy = length < capacity - 1 ? length : capacity - 1;
+            for (int i = 0; i < copy; i++) out[i] = bytes[i];
+            out[copy] = 0;
+        }
+        (*env)->ReleaseStringUTFChars(env, text, bytes);
+    }
+    (*env)->DeleteLocalRef(env, text);
+    return length;
+}
+
 void camera_native_pick(void) { call("pick"); }
 
 void camera_native_take(void) { call("take"); }

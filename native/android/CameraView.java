@@ -48,6 +48,8 @@ public final class CameraView extends TextureView implements TextureView.Surface
     private static int latestSensor;
 
     private String facing = "back";
+    // A Camera2 id (CameraDeviceView), or "" for `facing`'s.
+    private String deviceId = "";
     private CameraDevice device;
     private CameraCaptureSession session;
     private ImageReader still;
@@ -64,6 +66,12 @@ public final class CameraView extends TextureView implements TextureView.Surface
             @Override public View create(Context context, UiActivity.ViewEvents events) { return new CameraView(context); }
             @Override public void set(View view, String name, String value) {
                 CameraView camera = (CameraView)view;
+                if (name.equals("device")) {
+                    if (value.equals(camera.deviceId)) return;
+                    camera.deviceId = value;
+                    if (camera.device != null) { camera.close(); camera.open(); }
+                    return;
+                }
                 if (!name.equals("facing")) return;
                 String next = value.isEmpty() ? "back" : value;
                 if (next.equals(camera.facing)) return;
@@ -116,6 +124,10 @@ public final class CameraView extends TextureView implements TextureView.Surface
             String chosen = null;
             int wanted = facing.equals("front") ? CameraCharacteristics.LENS_FACING_FRONT : CameraCharacteristics.LENS_FACING_BACK;
             for (String id : manager.getCameraIdList()) {
+                if (!deviceId.isEmpty()) {
+                    if (id.equals(deviceId)) { chosen = id; break; }
+                    continue;
+                }
                 Integer lens = manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING);
                 if (lens != null && lens == wanted) { chosen = id; break; }
                 if (chosen == null) chosen = id;

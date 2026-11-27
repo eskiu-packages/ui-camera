@@ -43,4 +43,14 @@ mergeInto(LibraryManager.library, {
     return 1;
   },
   camera_native_frame_release: function() {},
+  // The browser's video inputs as "KIND\tID\tNAME" lines (camera_devices in src/camera.esk),
+  // from the list camera.mjs keeps (enumerateDevices is asynchronous): the length they need.
+  camera_native_devices__deps: ['$stringToUTF8', '$lengthBytesUTF8'],
+  camera_native_devices: function(out, capacity) {
+    const list = (window.eskiuCamera && window.eskiuCamera.devices) || [];
+    const clean = text => String(text || '').replace(/[\t\n\r]/g, ' ');
+    const text = list.map(d => `${d.kind}\t${clean(d.id)}\t${clean(d.name)}\n`).join('');
+    if (capacity > 0) stringToUTF8(text, out, capacity);
+    return lengthBytesUTF8(text);
+  },
 });
